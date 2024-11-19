@@ -65,6 +65,7 @@ export class Cline {
 	private didEditFile: boolean = false
 	customInstructions?: string
 	alwaysAllowReadOnly: boolean
+	alwaysAllowWriteOnly: boolean
 	apiConversationHistory: Anthropic.MessageParam[] = []
 	clineMessages: ClineMessage[] = []
 	private askResponse?: ClineAskResponse
@@ -94,6 +95,7 @@ export class Cline {
 		apiConfiguration: ApiConfiguration,
 		customInstructions?: string,
 		alwaysAllowReadOnly?: boolean,
+		alwaysAllowWriteOnly?: boolean,
 		task?: string,
 		images?: string[],
 		historyItem?: HistoryItem
@@ -106,6 +108,7 @@ export class Cline {
 		this.diffViewProvider = new DiffViewProvider(cwd)
 		this.customInstructions = customInstructions
 		this.alwaysAllowReadOnly = alwaysAllowReadOnly ?? false
+		this.alwaysAllowWriteOnly = alwaysAllowWriteOnly ?? false
 
 		if (historyItem) {
 			this.taskId = historyItem.id
@@ -194,10 +197,10 @@ export class Cline {
 			const taskMessage = this.clineMessages[0] // first message is always the task say
 			const lastRelevantMessage =
 				this.clineMessages[
-					findLastIndex(
-						this.clineMessages,
-						(m) => !(m.ask === "resume_task" || m.ask === "resume_completed_task")
-					)
+				findLastIndex(
+					this.clineMessages,
+					(m) => !(m.ask === "resume_task" || m.ask === "resume_completed_task")
+				)
 				]
 			await this.providerRef.deref()?.updateTaskHistory({
 				id: this.taskId,
@@ -617,8 +620,8 @@ export class Cline {
 			text:
 				`[TASK RESUMPTION] This task was interrupted ${agoText}. It may or may not be complete, so please reassess the task context. Be aware that the project state may have changed since then. The current working directory is now '${cwd.toPosix()}'. If the task has not been completed, retry the last step before interruption and proceed with completing the task.\n\nNote: If you previously attempted a tool use that the user did not provide a result for, you should assume the tool use was not successful and assess whether you should retry. If the last tool was a browser_action, the browser has been closed and you must launch a new browser if needed.${
 					wasRecent
-						? "\n\nIMPORTANT: If the last tool use was a write_to_file that was interrupted, the file was reverted back to its original state before the interrupted edit, and you do NOT need to re-read the file as you already have its up-to-date contents."
-						: ""
+					? "\n\nIMPORTANT: If the last tool use was a write_to_file that was interrupted, the file was reverted back to its original state before the interrupted edit, and you do NOT need to re-read the file as you already have its up-to-date contents."
+					: ""
 				}` +
 				(responseText
 					? `\n\nNew instructions for task continuation:\n<user_message>\n${responseText}\n</user_message>`
@@ -885,7 +888,7 @@ export class Cline {
 						case "search_files":
 							return `[${block.name} for '${block.params.regex}'${
 								block.params.file_pattern ? ` in '${block.params.file_pattern}'` : ""
-							}]`
+								}]`
 						case "list_files":
 							return `[${block.name} for '${block.params.path}']`
 						case "list_code_definition_names":
@@ -1066,7 +1069,11 @@ export class Cline {
 							if (block.partial) {
 								// update gui message
 								const partialMessage = JSON.stringify(sharedMessageProps)
-								await this.ask("tool", partialMessage, block.partial).catch(() => {})
+								if (this.alwaysAllowWriteOnly) {
+									await this.say("tool", partialMessage, undefined, block.partial)
+								} else {
+									await this.ask("tool", partialMessage, block.partial).catch(() => {})
+								}
 								// update editor
 								if (!this.diffViewProvider.isEditing) {
 									// open the editor and prepare to stream content in
@@ -1096,7 +1103,11 @@ export class Cline {
 								if (!this.diffViewProvider.isEditing) {
 									// show gui message before showing edit animation
 									const partialMessage = JSON.stringify(sharedMessageProps)
-									await this.ask("tool", partialMessage, true).catch(() => {}) // sending true for partial even though it's not a partial, this shows the edit row before the content is streamed into the editor
+									if (this.alwaysAllowWriteOnly) {
+										await this.say("tool", partialMessage, undefined, true)
+									} else {
+										await this.ask("tool", partialMessage, true).catch(() => {}) // sending true for partial even though it's not a partial, this shows the edit row before the content is streamed into the editor
+									}
 									await this.diffViewProvider.open(relPath)
 								}
 								await this.diffViewProvider.update(newContent, true)
@@ -1109,13 +1120,13 @@ export class Cline {
 									content: fileExists ? undefined : newContent,
 									diff: fileExists
 										? formatResponse.createPrettyPatch(
-												relPath,
-												this.diffViewProvider.originalContent,
-												newContent
-										  )
+											relPath,
+											this.diffViewProvider.originalContent,
+											newContent
+										)
 										: undefined,
 								} satisfies ClineSayTool)
-								const didApprove = await askApproval("tool", completeMessage)
+								const didApprove = this.alwaysAllowWriteOnly || await askApproval("tool", completeMessage)
 								if (!didApprove) {
 									await this.diffViewProvider.revertChanges()
 									break
@@ -1134,13 +1145,13 @@ export class Cline {
 									)
 									pushToolResult(
 										`The user made the following updates to your content:\n\n${userEdits}\n\n` +
-											`The updated content, which includes both your original modifications and the user's edits, has been successfully saved to ${relPath.toPosix()}. Here is the full, updated content of the file:\n\n` +
-											`<final_file_content path="${relPath.toPosix()}">\n${finalContent}\n</final_file_content>\n\n` +
-											`Please note:\n` +
-											`1. You do not need to re-write the file with these changes, as they have already been applied.\n` +
-											`2. Proceed with the task using this updated file content as the new baseline.\n` +
-											`3. If the user's edits have addressed part of the task or changed the requirements, adjust your approach accordingly.` +
-											`${newProblemsMessage}`
+										`The updated content, which includes both your original modifications and the user's edits, has been successfully saved to ${relPath.toPosix()}. Here is the full, updated content of the file:\n\n` +
+										`<final_file_content path="${relPath.toPosix()}">\n${finalContent}\n</final_file_content>\n\n` +
+										`Please note:\n` +
+										`1. You do not need to re-write the file with these changes, as they have already been applied.\n` +
+										`2. Proceed with the task using this updated file content as the new baseline.\n` +
+										`3. If the user's edits have addressed part of the task or changed the requirements, adjust your approach accordingly.` +
+										`${newProblemsMessage}`
 									)
 								} else {
 									pushToolResult(
@@ -1242,8 +1253,8 @@ export class Cline {
 									await this.say("tool", completeMessage, undefined, false)
 								} else {
 									const didApprove = await askApproval("tool", completeMessage)
-									if (!didApprove) {
-										break
+								if (!didApprove) {
+									break
 									}
 								}
 								pushToolResult(result)
@@ -1291,8 +1302,8 @@ export class Cline {
 									await this.say("tool", completeMessage, undefined, false)
 								} else {
 									const didApprove = await askApproval("tool", completeMessage)
-									if (!didApprove) {
-										break
+								if (!didApprove) {
+									break
 									}
 								}
 								pushToolResult(result)
@@ -1347,8 +1358,8 @@ export class Cline {
 									await this.say("tool", completeMessage, undefined, false)
 								} else {
 									const didApprove = await askApproval("tool", completeMessage)
-									if (!didApprove) {
-										break
+								if (!didApprove) {
+									break
 									}
 								}
 								pushToolResult(results)
@@ -1665,29 +1676,29 @@ export class Cline {
 								if (response === "yesButtonClicked") {
 									pushToolResult("") // signals to recursive loop to stop (for now this never happens since yesButtonClicked will trigger a new task)
 									break
-								}
-								await this.say("user_feedback", text ?? "", images)
+						}
+						await this.say("user_feedback", text ?? "", images)
 
-								const toolResults: (Anthropic.TextBlockParam | Anthropic.ImageBlockParam)[] = []
-								if (commandResult) {
-									if (typeof commandResult === "string") {
-										toolResults.push({ type: "text", text: commandResult })
+						const toolResults: (Anthropic.TextBlockParam | Anthropic.ImageBlockParam)[] = []
+						if (commandResult) {
+							if (typeof commandResult === "string") {
+								toolResults.push({ type: "text", text: commandResult })
 									} else if (Array.isArray(commandResult)) {
-										toolResults.push(...commandResult)
-									}
-								}
-								toolResults.push({
-									type: "text",
-									text: `The user has provided feedback on the results. Consider their input to continue the task, and then attempt completion again.\n<feedback>\n${text}\n</feedback>`,
-								})
-								toolResults.push(...formatResponse.imageBlocks(images))
-								this.userMessageContent.push({
-									type: "text",
-									text: `${toolDescription()} Result:`,
-								})
-								this.userMessageContent.push(...toolResults)
+								toolResults.push(...commandResult)
+							}
+						}
+						toolResults.push({
+							type: "text",
+							text: `The user has provided feedback on the results. Consider their input to continue the task, and then attempt completion again.\n<feedback>\n${text}\n</feedback>`,
+						})
+						toolResults.push(...formatResponse.imageBlocks(images))
+						this.userMessageContent.push({
+							type: "text",
+							text: `${toolDescription()} Result:`,
+						})
+						this.userMessageContent.push(...toolResults)
 
-								break
+						break
 							}
 						} catch (error) {
 							await handleError("inspecting site", error)
@@ -1702,483 +1713,483 @@ export class Cline {
 		Seeing out of bounds is fine, it means that the next too call is being built up and ready to add to assistantMessageContent to present. 
 		When you see the UI inactive during this, it means that a tool is breaking without presenting any UI. For example the write_to_file tool was breaking when relpath was undefined, and for invalid relpath it never presented UI.
 		*/
-		this.presentAssistantMessageLocked = false // this needs to be placed here, if not then calling this.presentAssistantMessage below would fail (sometimes) since it's locked
-		// NOTE: when tool is rejected, iterator stream is interrupted and it waits for userMessageContentReady to be true. Future calls to present will skip execution since didRejectTool and iterate until contentIndex is set to message length and it sets userMessageContentReady to true itself (instead of preemptively doing it in iterator)
-		if (!block.partial || this.didRejectTool || this.didAlreadyUseTool) {
-			// block is finished streaming and executing
-			if (this.currentStreamingContentIndex === this.assistantMessageContent.length - 1) {
-				// its okay that we increment if !didCompleteReadingStream, it'll just return bc out of bounds and as streaming continues it will call presentAssitantMessage if a new block is ready. if streaming is finished then we set userMessageContentReady to true when out of bounds. This gracefully allows the stream to continue on and all potential content blocks be presented.
-				// last block is complete and it is finished executing
-				this.userMessageContentReady = true // will allow pwaitfor to continue
-			}
+						this.presentAssistantMessageLocked = false // this needs to be placed here, if not then calling this.presentAssistantMessage below would fail (sometimes) since it's locked
+						// NOTE: when tool is rejected, iterator stream is interrupted and it waits for userMessageContentReady to be true. Future calls to present will skip execution since didRejectTool and iterate until contentIndex is set to message length and it sets userMessageContentReady to true itself (instead of preemptively doing it in iterator)
+						if (!block.partial || this.didRejectTool || this.didAlreadyUseTool) {
+							// block is finished streaming and executing
+							if (this.currentStreamingContentIndex === this.assistantMessageContent.length - 1) {
+								// its okay that we increment if !didCompleteReadingStream, it'll just return bc out of bounds and as streaming continues it will call presentAssitantMessage if a new block is ready. if streaming is finished then we set userMessageContentReady to true when out of bounds. This gracefully allows the stream to continue on and all potential content blocks be presented.
+								// last block is complete and it is finished executing
+								this.userMessageContentReady = true // will allow pwaitfor to continue
+							}
 
-			// call next block if it exists (if not then read stream will call it when its ready)
-			this.currentStreamingContentIndex++ // need to increment regardless, so when read stream calls this function again it will be streaming the next block
+							// call next block if it exists (if not then read stream will call it when its ready)
+							this.currentStreamingContentIndex++ // need to increment regardless, so when read stream calls this function again it will be streaming the next block
 
-			if (this.currentStreamingContentIndex < this.assistantMessageContent.length) {
-				// there are already more content blocks to stream, so we'll call this function ourselves
-				// await this.presentAssistantContent()
+							if (this.currentStreamingContentIndex < this.assistantMessageContent.length) {
+								// there are already more content blocks to stream, so we'll call this function ourselves
+								// await this.presentAssistantContent()
 
-				this.presentAssistantMessage()
-				return
-			}
-		}
-		// block is partial, but the read stream may have finished
-		if (this.presentAssistantMessageHasPendingUpdates) {
-			this.presentAssistantMessage()
-		}
-	}
+								this.presentAssistantMessage()
+								return
+							}
+						}
+						// block is partial, but the read stream may have finished
+						if (this.presentAssistantMessageHasPendingUpdates) {
+							this.presentAssistantMessage()
+						}
+					}
 
 	async recursivelyMakeClineRequests(
-		userContent: UserContent,
-		includeFileDetails: boolean = false
+						userContent: UserContent,
+						includeFileDetails: boolean = false
 	): Promise<boolean> {
 		if (this.abort) {
-			throw new Error("Cline instance aborted")
-		}
+							throw new Error("Cline instance aborted")
+						}
 
-		if (this.consecutiveMistakeCount >= 3) {
-			const { response, text, images } = await this.ask(
-				"mistake_limit_reached",
-				this.api.getModel().id.includes("claude")
-					? `This may indicate a failure in his thought process or inability to use a tool properly, which can be mitigated with some user guidance (e.g. "Try breaking down the task into smaller steps").`
-					: "Cline uses complex prompts and iterative task execution that may be challenging for less capable models. For best results, it's recommended to use Claude 3.5 Sonnet for its advanced agentic coding capabilities."
-			)
-			if (response === "messageResponse") {
-				userContent.push(
-					...[
-						{
-							type: "text",
-							text: formatResponse.tooManyMistakes(text),
-						} as Anthropic.Messages.TextBlockParam,
-						...formatResponse.imageBlocks(images),
-					]
-				)
-			}
-			this.consecutiveMistakeCount = 0
-		}
+						if (this.consecutiveMistakeCount >= 3) {
+							const { response, text, images } = await this.ask(
+								"mistake_limit_reached",
+								this.api.getModel().id.includes("claude")
+									? `This may indicate a failure in his thought process or inability to use a tool properly, which can be mitigated with some user guidance (e.g. "Try breaking down the task into smaller steps").`
+									: "Cline uses complex prompts and iterative task execution that may be challenging for less capable models. For best results, it's recommended to use Claude 3.5 Sonnet for its advanced agentic coding capabilities."
+							)
+							if (response === "messageResponse") {
+								userContent.push(
+									...[
+										{
+											type: "text",
+											text: formatResponse.tooManyMistakes(text),
+										} as Anthropic.Messages.TextBlockParam,
+										...formatResponse.imageBlocks(images),
+									]
+								)
+							}
+							this.consecutiveMistakeCount = 0
+						}
 
-		// get previous api req's index to check token usage and determine if we need to truncate conversation history
-		const previousApiReqIndex = findLastIndex(this.clineMessages, (m) => m.say === "api_req_started")
+						// get previous api req's index to check token usage and determine if we need to truncate conversation history
+						const previousApiReqIndex = findLastIndex(this.clineMessages, (m) => m.say === "api_req_started")
 
-		// getting verbose details is an expensive operation, it uses globby to top-down build file structure of project which for large projects can take a few seconds
-		// for the best UX we show a placeholder api_req_started message with a loading spinner as this happens
-		await this.say(
-			"api_req_started",
-			JSON.stringify({
-				request:
-					userContent.map((block) => formatContentBlockToMarkdown(block)).join("\n\n") + "\n\nLoading...",
-			})
-		)
+						// getting verbose details is an expensive operation, it uses globby to top-down build file structure of project which for large projects can take a few seconds
+						// for the best UX we show a placeholder api_req_started message with a loading spinner as this happens
+						await this.say(
+							"api_req_started",
+							JSON.stringify({
+								request:
+									userContent.map((block) => formatContentBlockToMarkdown(block)).join("\n\n") + "\n\nLoading...",
+							})
+						)
 
-		const [parsedUserContent, environmentDetails] = await this.loadContext(userContent, includeFileDetails)
-		userContent = parsedUserContent
-		// add environment details as its own text block, separate from tool results
-		userContent.push({ type: "text", text: environmentDetails })
+						const [parsedUserContent, environmentDetails] = await this.loadContext(userContent, includeFileDetails)
+						userContent = parsedUserContent
+						// add environment details as its own text block, separate from tool results
+						userContent.push({ type: "text", text: environmentDetails })
 
-		await this.addToApiConversationHistory({ role: "user", content: userContent })
+						await this.addToApiConversationHistory({ role: "user", content: userContent })
 
-		// since we sent off a placeholder api_req_started message to update the webview while waiting to actually start the API request (to load potential details for example), we need to update the text of that message
-		const lastApiReqIndex = findLastIndex(this.clineMessages, (m) => m.say === "api_req_started")
-		this.clineMessages[lastApiReqIndex].text = JSON.stringify({
-			request: userContent.map((block) => formatContentBlockToMarkdown(block)).join("\n\n"),
-		} satisfies ClineApiReqInfo)
-		await this.saveClineMessages()
-		await this.providerRef.deref()?.postStateToWebview()
+						// since we sent off a placeholder api_req_started message to update the webview while waiting to actually start the API request (to load potential details for example), we need to update the text of that message
+						const lastApiReqIndex = findLastIndex(this.clineMessages, (m) => m.say === "api_req_started")
+						this.clineMessages[lastApiReqIndex].text = JSON.stringify({
+							request: userContent.map((block) => formatContentBlockToMarkdown(block)).join("\n\n"),
+						} satisfies ClineApiReqInfo)
+						await this.saveClineMessages()
+						await this.providerRef.deref()?.postStateToWebview()
 
-		try {
-			let cacheWriteTokens = 0
-			let cacheReadTokens = 0
-			let inputTokens = 0
-			let outputTokens = 0
-			let totalCost: number | undefined
+						try {
+							let cacheWriteTokens = 0
+							let cacheReadTokens = 0
+							let inputTokens = 0
+							let outputTokens = 0
+							let totalCost: number | undefined
 
-			// update api_req_started. we can't use api_req_finished anymore since it's a unique case where it could come after a streaming message (ie in the middle of being updated or executed)
-			// fortunately api_req_finished was always parsed out for the gui anyways, so it remains solely for legacy purposes to keep track of prices in tasks from history
-			// (it's worth removing a few months from now)
-			const updateApiReqMsg = (cancelReason?: ClineApiReqCancelReason, streamingFailedMessage?: string) => {
-				this.clineMessages[lastApiReqIndex].text = JSON.stringify({
-					...JSON.parse(this.clineMessages[lastApiReqIndex].text || "{}"),
-					tokensIn: inputTokens,
-					tokensOut: outputTokens,
-					cacheWrites: cacheWriteTokens,
-					cacheReads: cacheReadTokens,
-					cost:
-						totalCost ??
-						calculateApiCost(
-							this.api.getModel().info,
-							inputTokens,
-							outputTokens,
-							cacheWriteTokens,
-							cacheReadTokens
-						),
-					cancelReason,
-					streamingFailedMessage,
-				} satisfies ClineApiReqInfo)
-			}
+							// update api_req_started. we can't use api_req_finished anymore since it's a unique case where it could come after a streaming message (ie in the middle of being updated or executed)
+							// fortunately api_req_finished was always parsed out for the gui anyways, so it remains solely for legacy purposes to keep track of prices in tasks from history
+							// (it's worth removing a few months from now)
+							const updateApiReqMsg = (cancelReason?: ClineApiReqCancelReason, streamingFailedMessage?: string) => {
+								this.clineMessages[lastApiReqIndex].text = JSON.stringify({
+									...JSON.parse(this.clineMessages[lastApiReqIndex].text || "{}"),
+									tokensIn: inputTokens,
+									tokensOut: outputTokens,
+									cacheWrites: cacheWriteTokens,
+									cacheReads: cacheReadTokens,
+									cost:
+										totalCost ??
+										calculateApiCost(
+											this.api.getModel().info,
+											inputTokens,
+											outputTokens,
+											cacheWriteTokens,
+											cacheReadTokens
+										),
+									cancelReason,
+									streamingFailedMessage,
+								} satisfies ClineApiReqInfo)
+							}
 
-			const abortStream = async (cancelReason: ClineApiReqCancelReason, streamingFailedMessage?: string) => {
-				if (this.diffViewProvider.isEditing) {
-					await this.diffViewProvider.revertChanges() // closes diff view
-				}
+							const abortStream = async (cancelReason: ClineApiReqCancelReason, streamingFailedMessage?: string) => {
+								if (this.diffViewProvider.isEditing) {
+									await this.diffViewProvider.revertChanges() // closes diff view
+								}
 
-				// if last message is a partial we need to update and save it
-				const lastMessage = this.clineMessages.at(-1)
-				if (lastMessage && lastMessage.partial) {
-					// lastMessage.ts = Date.now() DO NOT update ts since it is used as a key for virtuoso list
-					lastMessage.partial = false
-					// instead of streaming partialMessage events, we do a save and post like normal to persist to disk
-					console.log("updating partial message", lastMessage)
-					// await this.saveClineMessages()
-				}
+								// if last message is a partial we need to update and save it
+								const lastMessage = this.clineMessages.at(-1)
+								if (lastMessage && lastMessage.partial) {
+									// lastMessage.ts = Date.now() DO NOT update ts since it is used as a key for virtuoso list
+									lastMessage.partial = false
+									// instead of streaming partialMessage events, we do a save and post like normal to persist to disk
+									console.log("updating partial message", lastMessage)
+									// await this.saveClineMessages()
+								}
 
-				// Let assistant know their response was interrupted for when task is resumed
-				await this.addToApiConversationHistory({
-					role: "assistant",
-					content: [
-						{
-							type: "text",
-							text:
-								assistantMessage +
+								// Let assistant know their response was interrupted for when task is resumed
+								await this.addToApiConversationHistory({
+									role: "assistant",
+									content: [
+										{
+											type: "text",
+											text:
+												assistantMessage +
 								`\n\n[${
 									cancelReason === "streaming_failed"
-										? "Response interrupted by API Error"
-										: "Response interrupted by user"
-								}]`,
-						},
-					],
-				})
+													? "Response interrupted by API Error"
+													: "Response interrupted by user"
+												}]`,
+										},
+									],
+								})
 
-				// update api_req_started to have cancelled and cost, so that we can display the cost of the partial stream
-				updateApiReqMsg(cancelReason, streamingFailedMessage)
-				await this.saveClineMessages()
+								// update api_req_started to have cancelled and cost, so that we can display the cost of the partial stream
+								updateApiReqMsg(cancelReason, streamingFailedMessage)
+								await this.saveClineMessages()
 
-				// signals to provider that it can retrieve the saved messages from disk, as abortTask can not be awaited on in nature
-				this.didFinishAborting = true
-			}
-
-			// reset streaming state
-			this.currentStreamingContentIndex = 0
-			this.assistantMessageContent = []
-			this.didCompleteReadingStream = false
-			this.userMessageContent = []
-			this.userMessageContentReady = false
-			this.didRejectTool = false
-			this.didAlreadyUseTool = false
-			this.presentAssistantMessageLocked = false
-			this.presentAssistantMessageHasPendingUpdates = false
-			await this.diffViewProvider.reset()
-
-			const stream = this.attemptApiRequest(previousApiReqIndex) // yields only if the first chunk is successful, otherwise will allow the user to retry the request (most likely due to rate limit error, which gets thrown on the first chunk)
-			let assistantMessage = ""
-			try {
-				for await (const chunk of stream) {
-					switch (chunk.type) {
-						case "usage":
-							inputTokens += chunk.inputTokens
-							outputTokens += chunk.outputTokens
-							cacheWriteTokens += chunk.cacheWriteTokens ?? 0
-							cacheReadTokens += chunk.cacheReadTokens ?? 0
-							totalCost = chunk.totalCost
-							break
-						case "text":
-							assistantMessage += chunk.text
-							// parse raw assistant message into content blocks
-							const prevLength = this.assistantMessageContent.length
-							this.assistantMessageContent = parseAssistantMessage(assistantMessage)
-							if (this.assistantMessageContent.length > prevLength) {
-								this.userMessageContentReady = false // new content we need to present, reset to false in case previous content set this to true
+								// signals to provider that it can retrieve the saved messages from disk, as abortTask can not be awaited on in nature
+								this.didFinishAborting = true
 							}
-							// present content to user
-							this.presentAssistantMessage()
-							break
-					}
 
-					if (this.abort) {
-						console.log("aborting stream...")
-						if (!this.abandoned) {
-							// only need to gracefully abort if this instance isn't abandoned (sometimes openrouter stream hangs, in which case this would affect future instances of cline)
-							await abortStream("user_cancelled")
+							// reset streaming state
+							this.currentStreamingContentIndex = 0
+							this.assistantMessageContent = []
+							this.didCompleteReadingStream = false
+							this.userMessageContent = []
+							this.userMessageContentReady = false
+							this.didRejectTool = false
+							this.didAlreadyUseTool = false
+							this.presentAssistantMessageLocked = false
+							this.presentAssistantMessageHasPendingUpdates = false
+							await this.diffViewProvider.reset()
+
+							const stream = this.attemptApiRequest(previousApiReqIndex) // yields only if the first chunk is successful, otherwise will allow the user to retry the request (most likely due to rate limit error, which gets thrown on the first chunk)
+							let assistantMessage = ""
+							try {
+								for await (const chunk of stream) {
+									switch (chunk.type) {
+										case "usage":
+											inputTokens += chunk.inputTokens
+											outputTokens += chunk.outputTokens
+											cacheWriteTokens += chunk.cacheWriteTokens ?? 0
+											cacheReadTokens += chunk.cacheReadTokens ?? 0
+											totalCost = chunk.totalCost
+											break
+										case "text":
+											assistantMessage += chunk.text
+											// parse raw assistant message into content blocks
+											const prevLength = this.assistantMessageContent.length
+											this.assistantMessageContent = parseAssistantMessage(assistantMessage)
+											if (this.assistantMessageContent.length > prevLength) {
+												this.userMessageContentReady = false // new content we need to present, reset to false in case previous content set this to true
+											}
+											// present content to user
+											this.presentAssistantMessage()
+											break
+									}
+
+									if (this.abort) {
+										console.log("aborting stream...")
+										if (!this.abandoned) {
+											// only need to gracefully abort if this instance isn't abandoned (sometimes openrouter stream hangs, in which case this would affect future instances of cline)
+											await abortStream("user_cancelled")
+										}
+										break // aborts the stream
+									}
+
+									if (this.didRejectTool) {
+										// userContent has a tool rejection, so interrupt the assistant's response to present the user's feedback
+										assistantMessage += "\n\n[Response interrupted by user feedback]"
+										// this.userMessageContentReady = true // instead of setting this premptively, we allow the present iterator to finish and set userMessageContentReady when its ready
+										break
+									}
+
+									// PREV: we need to let the request finish for openrouter to get generation details
+									// UPDATE: it's better UX to interrupt the request at the cost of the api cost not being retrieved
+									if (this.didAlreadyUseTool) {
+										assistantMessage +=
+											"\n\n[Response interrupted by a tool use result. Only one tool may be used at a time and should be placed at the end of the message.]"
+										break
+									}
+								}
+							} catch (error) {
+								// abandoned happens when extension is no longer waiting for the cline instance to finish aborting (error is thrown here when any function in the for loop throws due to this.abort)
+								if (!this.abandoned) {
+									this.abortTask() // if the stream failed, there's various states the task could be in (i.e. could have streamed some tools the user may have executed), so we just resort to replicating a cancel task
+									await abortStream(
+										"streaming_failed",
+										error.message ?? JSON.stringify(serializeError(error), null, 2)
+									)
+									const history = await this.providerRef.deref()?.getTaskWithId(this.taskId)
+									if (history) {
+										await this.providerRef.deref()?.initClineWithHistoryItem(history.historyItem)
+										// await this.providerRef.deref()?.postStateToWebview()
+									}
+								}
+							}
+
+							// need to call here in case the stream was aborted
+							if (this.abort) {
+								throw new Error("Cline instance aborted")
+							}
+
+							this.didCompleteReadingStream = true
+
+							// set any blocks to be complete to allow presentAssistantMessage to finish and set userMessageContentReady to true
+							// (could be a text block that had no subsequent tool uses, or a text block at the very end, or an invalid tool use, etc. whatever the case, presentAssistantMessage relies on these blocks either to be completed or the user to reject a block in order to proceed and eventually set userMessageContentReady to true)
+							const partialBlocks = this.assistantMessageContent.filter((block) => block.partial)
+							partialBlocks.forEach((block) => {
+								block.partial = false
+							})
+							// this.assistantMessageContent.forEach((e) => (e.partial = false)) // cant just do this bc a tool could be in the middle of executing ()
+							if (partialBlocks.length > 0) {
+								this.presentAssistantMessage() // if there is content to update then it will complete and update this.userMessageContentReady to true, which we pwaitfor before making the next request. all this is really doing is presenting the last partial message that we just set to complete
+							}
+
+							updateApiReqMsg()
+							await this.saveClineMessages()
+							await this.providerRef.deref()?.postStateToWebview()
+
+							// now add to apiconversationhistory
+							// need to save assistant responses to file before proceeding to tool use since user can exit at any moment and we wouldn't be able to save the assistant's response
+							let didEndLoop = false
+							if (assistantMessage.length > 0) {
+								await this.addToApiConversationHistory({
+									role: "assistant",
+									content: [{ type: "text", text: assistantMessage }],
+								})
+
+								// NOTE: this comment is here for future reference - this was a workaround for userMessageContent not getting set to true. It was due to it not recursively calling for partial blocks when didRejectTool, so it would get stuck waiting for a partial block to complete before it could continue.
+								// in case the content blocks finished
+								// it may be the api stream finished after the last parsed content block was executed, so  we are able to detect out of bounds and set userMessageContentReady to true (note you should not call presentAssistantMessage since if the last block is completed it will be presented again)
+								// const completeBlocks = this.assistantMessageContent.filter((block) => !block.partial) // if there are any partial blocks after the stream ended we can consider them invalid
+								// if (this.currentStreamingContentIndex >= completeBlocks.length) {
+								// 	this.userMessageContentReady = true
+								// }
+
+								await pWaitFor(() => this.userMessageContentReady)
+
+								// if the model did not tool use, then we need to tell it to either use a tool or attempt_completion
+								const didToolUse = this.assistantMessageContent.some((block) => block.type === "tool_use")
+								if (!didToolUse) {
+									this.userMessageContent.push({
+										type: "text",
+										text: formatResponse.noToolsUsed(),
+									})
+									this.consecutiveMistakeCount++
+								}
+
+								const recDidEndLoop = await this.recursivelyMakeClineRequests(this.userMessageContent)
+								didEndLoop = recDidEndLoop
+							} else {
+								// if there's no assistant_responses, that means we got no text or tool_use content blocks from API which we should assume is an error
+								await this.say(
+									"error",
+									"Unexpected API Response: The language model did not provide any assistant messages. This may indicate an issue with the API or the model's output."
+								)
+								await this.addToApiConversationHistory({
+									role: "assistant",
+									content: [{ type: "text", text: "Failure: I did not provide a response." }],
+								})
+							}
+
+							return didEndLoop // will always be false for now
+						} catch (error) {
+							// this should never happen since the only thing that can throw an error is the attemptApiRequest, which is wrapped in a try catch that sends an ask where if noButtonClicked, will clear current task and destroy this instance. However to avoid unhandled promise rejection, we will end this loop which will end execution of this instance (see startTask)
+							return true // needs to be true so parent loop knows to end task
 						}
-						break // aborts the stream
-					}
-
-					if (this.didRejectTool) {
-						// userContent has a tool rejection, so interrupt the assistant's response to present the user's feedback
-						assistantMessage += "\n\n[Response interrupted by user feedback]"
-						// this.userMessageContentReady = true // instead of setting this premptively, we allow the present iterator to finish and set userMessageContentReady when its ready
-						break
-					}
-
-					// PREV: we need to let the request finish for openrouter to get generation details
-					// UPDATE: it's better UX to interrupt the request at the cost of the api cost not being retrieved
-					if (this.didAlreadyUseTool) {
-						assistantMessage +=
-							"\n\n[Response interrupted by a tool use result. Only one tool may be used at a time and should be placed at the end of the message.]"
-						break
-					}
 				}
-			} catch (error) {
-				// abandoned happens when extension is no longer waiting for the cline instance to finish aborting (error is thrown here when any function in the for loop throws due to this.abort)
-				if (!this.abandoned) {
-					this.abortTask() // if the stream failed, there's various states the task could be in (i.e. could have streamed some tools the user may have executed), so we just resort to replicating a cancel task
-					await abortStream(
-						"streaming_failed",
-						error.message ?? JSON.stringify(serializeError(error), null, 2)
-					)
-					const history = await this.providerRef.deref()?.getTaskWithId(this.taskId)
-					if (history) {
-						await this.providerRef.deref()?.initClineWithHistoryItem(history.historyItem)
-						// await this.providerRef.deref()?.postStateToWebview()
-					}
-				}
-			}
-
-			// need to call here in case the stream was aborted
-			if (this.abort) {
-				throw new Error("Cline instance aborted")
-			}
-
-			this.didCompleteReadingStream = true
-
-			// set any blocks to be complete to allow presentAssistantMessage to finish and set userMessageContentReady to true
-			// (could be a text block that had no subsequent tool uses, or a text block at the very end, or an invalid tool use, etc. whatever the case, presentAssistantMessage relies on these blocks either to be completed or the user to reject a block in order to proceed and eventually set userMessageContentReady to true)
-			const partialBlocks = this.assistantMessageContent.filter((block) => block.partial)
-			partialBlocks.forEach((block) => {
-				block.partial = false
-			})
-			// this.assistantMessageContent.forEach((e) => (e.partial = false)) // cant just do this bc a tool could be in the middle of executing ()
-			if (partialBlocks.length > 0) {
-				this.presentAssistantMessage() // if there is content to update then it will complete and update this.userMessageContentReady to true, which we pwaitfor before making the next request. all this is really doing is presenting the last partial message that we just set to complete
-			}
-
-			updateApiReqMsg()
-			await this.saveClineMessages()
-			await this.providerRef.deref()?.postStateToWebview()
-
-			// now add to apiconversationhistory
-			// need to save assistant responses to file before proceeding to tool use since user can exit at any moment and we wouldn't be able to save the assistant's response
-			let didEndLoop = false
-			if (assistantMessage.length > 0) {
-				await this.addToApiConversationHistory({
-					role: "assistant",
-					content: [{ type: "text", text: assistantMessage }],
-				})
-
-				// NOTE: this comment is here for future reference - this was a workaround for userMessageContent not getting set to true. It was due to it not recursively calling for partial blocks when didRejectTool, so it would get stuck waiting for a partial block to complete before it could continue.
-				// in case the content blocks finished
-				// it may be the api stream finished after the last parsed content block was executed, so  we are able to detect out of bounds and set userMessageContentReady to true (note you should not call presentAssistantMessage since if the last block is completed it will be presented again)
-				// const completeBlocks = this.assistantMessageContent.filter((block) => !block.partial) // if there are any partial blocks after the stream ended we can consider them invalid
-				// if (this.currentStreamingContentIndex >= completeBlocks.length) {
-				// 	this.userMessageContentReady = true
-				// }
-
-				await pWaitFor(() => this.userMessageContentReady)
-
-				// if the model did not tool use, then we need to tell it to either use a tool or attempt_completion
-				const didToolUse = this.assistantMessageContent.some((block) => block.type === "tool_use")
-				if (!didToolUse) {
-					this.userMessageContent.push({
-						type: "text",
-						text: formatResponse.noToolsUsed(),
-					})
-					this.consecutiveMistakeCount++
-				}
-
-				const recDidEndLoop = await this.recursivelyMakeClineRequests(this.userMessageContent)
-				didEndLoop = recDidEndLoop
-			} else {
-				// if there's no assistant_responses, that means we got no text or tool_use content blocks from API which we should assume is an error
-				await this.say(
-					"error",
-					"Unexpected API Response: The language model did not provide any assistant messages. This may indicate an issue with the API or the model's output."
-				)
-				await this.addToApiConversationHistory({
-					role: "assistant",
-					content: [{ type: "text", text: "Failure: I did not provide a response." }],
-				})
-			}
-
-			return didEndLoop // will always be false for now
-		} catch (error) {
-			// this should never happen since the only thing that can throw an error is the attemptApiRequest, which is wrapped in a try catch that sends an ask where if noButtonClicked, will clear current task and destroy this instance. However to avoid unhandled promise rejection, we will end this loop which will end execution of this instance (see startTask)
-			return true // needs to be true so parent loop knows to end task
-		}
-	}
 
 	async loadContext(userContent: UserContent, includeFileDetails: boolean = false) {
-		return await Promise.all([
-			// Process userContent array, which contains various block types:
-			// TextBlockParam, ImageBlockParam, ToolUseBlockParam, and ToolResultBlockParam.
-			// We need to apply parseMentions() to:
-			// 1. All TextBlockParam's text (first user message with task)
-			// 2. ToolResultBlockParam's content/context text arrays if it contains "<feedback>" (see formatToolDeniedFeedback, attemptCompletion, executeCommand, and consecutiveMistakeCount >= 3) or "<answer>" (see askFollowupQuestion), we place all user generated content in these tags so they can effectively be used as markers for when we should parse mentions)
-			Promise.all(
-				userContent.map(async (block) => {
-					if (block.type === "text") {
-						return {
-							...block,
-							text: await parseMentions(block.text, cwd, this.urlContentFetcher),
-						}
-					} else if (block.type === "tool_result") {
-						const isUserMessage = (text: string) => text.includes("<feedback>") || text.includes("<answer>")
-						if (typeof block.content === "string" && isUserMessage(block.content)) {
-							return {
-								...block,
-								content: await parseMentions(block.content, cwd, this.urlContentFetcher),
-							}
-						} else if (Array.isArray(block.content)) {
-							const parsedContent = await Promise.all(
-								block.content.map(async (contentBlock) => {
-									if (contentBlock.type === "text" && isUserMessage(contentBlock.text)) {
+					return await Promise.all([
+						// Process userContent array, which contains various block types:
+						// TextBlockParam, ImageBlockParam, ToolUseBlockParam, and ToolResultBlockParam.
+						// We need to apply parseMentions() to:
+						// 1. All TextBlockParam's text (first user message with task)
+						// 2. ToolResultBlockParam's content/context text arrays if it contains "<feedback>" (see formatToolDeniedFeedback, attemptCompletion, executeCommand, and consecutiveMistakeCount >= 3) or "<answer>" (see askFollowupQuestion), we place all user generated content in these tags so they can effectively be used as markers for when we should parse mentions)
+						Promise.all(
+							userContent.map(async (block) => {
+								if (block.type === "text") {
+									return {
+										...block,
+										text: await parseMentions(block.text, cwd, this.urlContentFetcher),
+									}
+								} else if (block.type === "tool_result") {
+									const isUserMessage = (text: string) => text.includes("<feedback>") || text.includes("<answer>")
+									if (typeof block.content === "string" && isUserMessage(block.content)) {
 										return {
-											...contentBlock,
-											text: await parseMentions(contentBlock.text, cwd, this.urlContentFetcher),
+											...block,
+											content: await parseMentions(block.content, cwd, this.urlContentFetcher),
+										}
+									} else if (Array.isArray(block.content)) {
+										const parsedContent = await Promise.all(
+											block.content.map(async (contentBlock) => {
+												if (contentBlock.type === "text" && isUserMessage(contentBlock.text)) {
+													return {
+														...contentBlock,
+														text: await parseMentions(contentBlock.text, cwd, this.urlContentFetcher),
+													}
+												}
+												return contentBlock
+											})
+										)
+										return {
+											...block,
+											content: parsedContent,
 										}
 									}
-									return contentBlock
-								})
-							)
-							return {
-								...block,
-								content: parsedContent,
+								}
+								return block
+							})
+						),
+						this.getEnvironmentDetails(includeFileDetails),
+					])
+				}
+
+	async getEnvironmentDetails(includeFileDetails: boolean = false) {
+					let details = ""
+
+					// It could be useful for cline to know if the user went from one or no file to another between messages, so we always include this context
+					details += "\n\n# VSCode Visible Files"
+					const visibleFiles = vscode.window.visibleTextEditors
+						?.map((editor) => editor.document?.uri?.fsPath)
+						.filter(Boolean)
+						.map((absolutePath) => path.relative(cwd, absolutePath).toPosix())
+						.join("\n")
+					if (visibleFiles) {
+						details += `\n${visibleFiles}`
+					} else {
+						details += "\n(No visible files)"
+					}
+
+					details += "\n\n# VSCode Open Tabs"
+					const openTabs = vscode.window.tabGroups.all
+						.flatMap((group) => group.tabs)
+						.map((tab) => (tab.input as vscode.TabInputText)?.uri?.fsPath)
+						.filter(Boolean)
+						.map((absolutePath) => path.relative(cwd, absolutePath).toPosix())
+						.join("\n")
+					if (openTabs) {
+						details += `\n${openTabs}`
+					} else {
+						details += "\n(No open tabs)"
+					}
+
+					const busyTerminals = this.terminalManager.getTerminals(true)
+					const inactiveTerminals = this.terminalManager.getTerminals(false)
+					// const allTerminals = [...busyTerminals, ...inactiveTerminals]
+
+					if (busyTerminals.length > 0 && this.didEditFile) {
+						//  || this.didEditFile
+						await delay(300) // delay after saving file to let terminals catch up
+					}
+
+					// let terminalWasBusy = false
+					if (busyTerminals.length > 0) {
+						// wait for terminals to cool down
+						// terminalWasBusy = allTerminals.some((t) => this.terminalManager.isProcessHot(t.id))
+						await pWaitFor(() => busyTerminals.every((t) => !this.terminalManager.isProcessHot(t.id)), {
+							interval: 100,
+							timeout: 15_000,
+			}).catch(() => {})
+					}
+
+					// we want to get diagnostics AFTER terminal cools down for a few reasons: terminal could be scaffolding a project, dev servers (compilers like webpack) will first re-compile and then send diagnostics, etc
+					/*
+					let diagnosticsDetails = ""
+					const diagnostics = await this.diagnosticsMonitor.getCurrentDiagnostics(this.didEditFile || terminalWasBusy) // if cline ran a command (ie npm install) or edited the workspace then wait a bit for updated diagnostics
+					for (const [uri, fileDiagnostics] of diagnostics) {
+						const problems = fileDiagnostics.filter((d) => d.severity === vscode.DiagnosticSeverity.Error)
+						if (problems.length > 0) {
+							diagnosticsDetails += `\n## ${path.relative(cwd, uri.fsPath)}`
+							for (const diagnostic of problems) {
+								// let severity = diagnostic.severity === vscode.DiagnosticSeverity.Error ? "Error" : "Warning"
+								const line = diagnostic.range.start.line + 1 // VSCode lines are 0-indexed
+								const source = diagnostic.source ? `[${diagnostic.source}] ` : ""
+								diagnosticsDetails += `\n- ${source}Line ${line}: ${diagnostic.message}`
 							}
 						}
 					}
-					return block
-				})
-			),
-			this.getEnvironmentDetails(includeFileDetails),
-		])
-	}
+					*/
+					this.didEditFile = false // reset, this lets us know when to wait for saved files to update terminals
 
-	async getEnvironmentDetails(includeFileDetails: boolean = false) {
-		let details = ""
-
-		// It could be useful for cline to know if the user went from one or no file to another between messages, so we always include this context
-		details += "\n\n# VSCode Visible Files"
-		const visibleFiles = vscode.window.visibleTextEditors
-			?.map((editor) => editor.document?.uri?.fsPath)
-			.filter(Boolean)
-			.map((absolutePath) => path.relative(cwd, absolutePath).toPosix())
-			.join("\n")
-		if (visibleFiles) {
-			details += `\n${visibleFiles}`
-		} else {
-			details += "\n(No visible files)"
-		}
-
-		details += "\n\n# VSCode Open Tabs"
-		const openTabs = vscode.window.tabGroups.all
-			.flatMap((group) => group.tabs)
-			.map((tab) => (tab.input as vscode.TabInputText)?.uri?.fsPath)
-			.filter(Boolean)
-			.map((absolutePath) => path.relative(cwd, absolutePath).toPosix())
-			.join("\n")
-		if (openTabs) {
-			details += `\n${openTabs}`
-		} else {
-			details += "\n(No open tabs)"
-		}
-
-		const busyTerminals = this.terminalManager.getTerminals(true)
-		const inactiveTerminals = this.terminalManager.getTerminals(false)
-		// const allTerminals = [...busyTerminals, ...inactiveTerminals]
-
-		if (busyTerminals.length > 0 && this.didEditFile) {
-			//  || this.didEditFile
-			await delay(300) // delay after saving file to let terminals catch up
-		}
-
-		// let terminalWasBusy = false
-		if (busyTerminals.length > 0) {
-			// wait for terminals to cool down
-			// terminalWasBusy = allTerminals.some((t) => this.terminalManager.isProcessHot(t.id))
-			await pWaitFor(() => busyTerminals.every((t) => !this.terminalManager.isProcessHot(t.id)), {
-				interval: 100,
-				timeout: 15_000,
-			}).catch(() => {})
-		}
-
-		// we want to get diagnostics AFTER terminal cools down for a few reasons: terminal could be scaffolding a project, dev servers (compilers like webpack) will first re-compile and then send diagnostics, etc
-		/*
-		let diagnosticsDetails = ""
-		const diagnostics = await this.diagnosticsMonitor.getCurrentDiagnostics(this.didEditFile || terminalWasBusy) // if cline ran a command (ie npm install) or edited the workspace then wait a bit for updated diagnostics
-		for (const [uri, fileDiagnostics] of diagnostics) {
-			const problems = fileDiagnostics.filter((d) => d.severity === vscode.DiagnosticSeverity.Error)
-			if (problems.length > 0) {
-				diagnosticsDetails += `\n## ${path.relative(cwd, uri.fsPath)}`
-				for (const diagnostic of problems) {
-					// let severity = diagnostic.severity === vscode.DiagnosticSeverity.Error ? "Error" : "Warning"
-					const line = diagnostic.range.start.line + 1 // VSCode lines are 0-indexed
-					const source = diagnostic.source ? `[${diagnostic.source}] ` : ""
-					diagnosticsDetails += `\n- ${source}Line ${line}: ${diagnostic.message}`
-				}
-			}
-		}
-		*/
-		this.didEditFile = false // reset, this lets us know when to wait for saved files to update terminals
-
-		// waiting for updated diagnostics lets terminal output be the most up-to-date possible
-		let terminalDetails = ""
-		if (busyTerminals.length > 0) {
-			// terminals are cool, let's retrieve their output
-			terminalDetails += "\n\n# Actively Running Terminals"
-			for (const busyTerminal of busyTerminals) {
-				terminalDetails += `\n## Original command: \`${busyTerminal.lastCommand}\``
-				const newOutput = this.terminalManager.getUnretrievedOutput(busyTerminal.id)
-				if (newOutput) {
-					terminalDetails += `\n### New Output\n${newOutput}`
-				} else {
-					// details += `\n(Still running, no new output)` // don't want to show this right after running the command
-				}
-			}
-		}
-		// only show inactive terminals if there's output to show
-		if (inactiveTerminals.length > 0) {
-			const inactiveTerminalOutputs = new Map<number, string>()
-			for (const inactiveTerminal of inactiveTerminals) {
-				const newOutput = this.terminalManager.getUnretrievedOutput(inactiveTerminal.id)
-				if (newOutput) {
-					inactiveTerminalOutputs.set(inactiveTerminal.id, newOutput)
-				}
-			}
-			if (inactiveTerminalOutputs.size > 0) {
-				terminalDetails += "\n\n# Inactive Terminals"
-				for (const [terminalId, newOutput] of inactiveTerminalOutputs) {
-					const inactiveTerminal = inactiveTerminals.find((t) => t.id === terminalId)
-					if (inactiveTerminal) {
-						terminalDetails += `\n## ${inactiveTerminal.lastCommand}`
-						terminalDetails += `\n### New Output\n${newOutput}`
+					// waiting for updated diagnostics lets terminal output be the most up-to-date possible
+					let terminalDetails = ""
+					if (busyTerminals.length > 0) {
+						// terminals are cool, let's retrieve their output
+						terminalDetails += "\n\n# Actively Running Terminals"
+						for (const busyTerminal of busyTerminals) {
+							terminalDetails += `\n## Original command: \`${busyTerminal.lastCommand}\``
+							const newOutput = this.terminalManager.getUnretrievedOutput(busyTerminal.id)
+							if (newOutput) {
+								terminalDetails += `\n### New Output\n${newOutput}`
+							} else {
+								// details += `\n(Still running, no new output)` // don't want to show this right after running the command
+							}
+						}
 					}
+					// only show inactive terminals if there's output to show
+					if (inactiveTerminals.length > 0) {
+						const inactiveTerminalOutputs = new Map<number, string>()
+						for (const inactiveTerminal of inactiveTerminals) {
+							const newOutput = this.terminalManager.getUnretrievedOutput(inactiveTerminal.id)
+							if (newOutput) {
+								inactiveTerminalOutputs.set(inactiveTerminal.id, newOutput)
+							}
+						}
+						if (inactiveTerminalOutputs.size > 0) {
+							terminalDetails += "\n\n# Inactive Terminals"
+							for (const [terminalId, newOutput] of inactiveTerminalOutputs) {
+								const inactiveTerminal = inactiveTerminals.find((t) => t.id === terminalId)
+								if (inactiveTerminal) {
+									terminalDetails += `\n## ${inactiveTerminal.lastCommand}`
+									terminalDetails += `\n### New Output\n${newOutput}`
+								}
+							}
+						}
+					}
+
+					// details += "\n\n# VSCode Workspace Errors"
+					// if (diagnosticsDetails) {
+					// 	details += diagnosticsDetails
+					// } else {
+					// 	details += "\n(No errors detected)"
+					// }
+
+					if (terminalDetails) {
+						details += terminalDetails
+					}
+
+					if (includeFileDetails) {
+						details += `\n\n# Current Working Directory (${cwd.toPosix()}) Files\n`
+						const isDesktop = arePathsEqual(cwd, path.join(os.homedir(), "Desktop"))
+						if (isDesktop) {
+							// don't want to immediately access desktop since it would show permission popup
+							details += "(Desktop files not shown automatically. Use list_files to explore if needed.)"
+						} else {
+							const [files, didHitLimit] = await listFiles(cwd, true, 200)
+							const result = formatResponse.formatFilesList(cwd, files, didHitLimit)
+							details += result
+						}
+					}
+
+					return `<environment_details>\n${details.trim()}\n</environment_details>`
 				}
-			}
 		}
-
-		// details += "\n\n# VSCode Workspace Errors"
-		// if (diagnosticsDetails) {
-		// 	details += diagnosticsDetails
-		// } else {
-		// 	details += "\n(No errors detected)"
-		// }
-
-		if (terminalDetails) {
-			details += terminalDetails
-		}
-
-		if (includeFileDetails) {
-			details += `\n\n# Current Working Directory (${cwd.toPosix()}) Files\n`
-			const isDesktop = arePathsEqual(cwd, path.join(os.homedir(), "Desktop"))
-			if (isDesktop) {
-				// don't want to immediately access desktop since it would show permission popup
-				details += "(Desktop files not shown automatically. Use list_files to explore if needed.)"
-			} else {
-				const [files, didHitLimit] = await listFiles(cwd, true, 200)
-				const result = formatResponse.formatFilesList(cwd, files, didHitLimit)
-				details += result
-			}
-		}
-
-		return `<environment_details>\n${details.trim()}\n</environment_details>`
-	}
-}
